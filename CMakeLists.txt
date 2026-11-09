@@ -163,6 +163,8 @@ target_sources(OpenRbDistort
         plugin/PluginProcessor.h
         plugin/PluginEditor.cpp
         plugin/PluginEditor.h
+        plugin/RecallImport.cpp
+        plugin/RecallImport.h
 )
 
 target_include_directories(OpenRbDistort PRIVATE include)
@@ -189,6 +191,46 @@ target_link_libraries(OpenRbDistort
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags
 )
+
+juce_add_console_app(OpenRbDistortTests
+    PRODUCT_NAME "OpenRbDistortTests"
+)
+
+juce_generate_juce_header(OpenRbDistortTests)
+
+target_sources(OpenRbDistortTests
+    PRIVATE
+        tests/RecallImportTests.cpp
+        plugin/PluginProcessor.cpp
+        plugin/PluginProcessor.h
+        plugin/PluginEditor.cpp
+        plugin/PluginEditor.h
+        plugin/RecallImport.cpp
+        plugin/RecallImport.h
+)
+
+target_include_directories(OpenRbDistortTests PRIVATE include plugin)
+
+target_compile_definitions(OpenRbDistortTests
+    PUBLIC
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_VST3_CAN_REPLACE_VST2=0
+        JUCE_REPORT_APP_USAGE=0
+    PRIVATE
+        JucePlugin_Name="OpenRB Distort"
+)
+
+target_link_libraries(OpenRbDistortTests
+    PRIVATE
+        ${ORB_DIST_LINK_LIB}
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+
+enable_testing()
+add_test(NAME OpenRbDistortRecallImport COMMAND OpenRbDistortTests)
 
 # JUCE's copy step skips Standalone (it is an app, not a plugin format folder).
 if(APPLE)

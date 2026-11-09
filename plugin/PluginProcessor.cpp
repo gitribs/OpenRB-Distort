@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "RecallImport.h"
 
 #include <algorithm>
 #include <cmath>
@@ -235,6 +236,16 @@ void DistProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce
 {
     juce::ignoreUnused (midi);
     processBuffer (buffer, true);
+}
+
+juce::String DistProcessor::importRecall (const juce::String& text)
+{
+    DistRecall parsed;
+    const auto err = parseRecall (text, parsed);
+    if (err.isNotEmpty())
+        return err;
+    applyRecall (apvts, parsed);
+    return {};
 }
 
 juce::AudioProcessorEditor* DistProcessor::createEditor()
