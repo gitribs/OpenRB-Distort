@@ -13,6 +13,7 @@ typedef struct OrbDistParams {
     uint8_t amount;  /* 0..127 */
     uint8_t shape;   /* 0..127, 0 = 1.5 hard clip */
     uint8_t bypass;
+    uint8_t enabled; /* 0|1, default 1; internal device on, not host bypass */
 } OrbDistParams;
 
 OrbDist *orb_dist_new(void);

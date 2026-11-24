@@ -4,11 +4,28 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace
 {
 constexpr double kEngineRate = 44100.0;
 constexpr int kDistBlock = 64;
+constexpr int kPrintPpq = 192;
+constexpr const char* kPrintIds[] = { "amount", "shape", "enabled" };
+constexpr int kPrintCount = (int) (sizeof kPrintIds / sizeof kPrintIds[0]);
+static_assert (kPrintCount == 3, "print ids must match DistProcessor::kPrintParams");
+constexpr int kEnabledPrintIndex = 2;
+static_assert (sizeof (OrbDistParams) == 4, "OrbDistParams ABI: amount, shape, bypass, enabled");
+
+int printIndexForId (const char* id)
+{
+    if (id == nullptr)
+        return -1;
+    for (int i = 0; i < kPrintCount; ++i)
+        if (std::strcmp (id, kPrintIds[i]) == 0)
+            return i;
+    return -1;
+}
 
 // Starting values for a newly inserted effect. Hosts restore project and preset
 // state through setStateInformation, which replaces these after construction.
@@ -30,16 +47,22 @@ DistProcessor::DistProcessor()
 {
 }
 
-DistProcessor::~DistProcessor() = default;
+DistProcessor::~DistProcessor()
+{
+    cancelPendingUpdate();
+    endPrintGestures();
+}
 
 juce::AudioProcessorValueTreeState::ParameterLayout DistProcessor::createLayout()
 {
+    using juce::AudioParameterBool;
     using juce::AudioParameterInt;
     using juce::ParameterID;
 
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> p;
     p.push_back (std::make_unique<AudioParameterInt> (ParameterID { "amount", 1 }, "Amount", 0, 127, kDefaultAmount));
     p.push_back (std::make_unique<AudioParameterInt> (ParameterID { "shape", 1 }, "Shape", 0, 127, kDefaultShape));
+    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { "enabled", 1 }, "On", true));
     return { p.begin(), p.end() };
 }
 
@@ -126,6 +149,7 @@ OrbDistParams DistProcessor::readParams (bool bypass) const
     params.amount = (uint8_t) juce::jlimit (0, 127, asInt ("amount", kDefaultAmount));
     params.shape = (uint8_t) juce::jlimit (0, 127, asInt ("shape", kDefaultShape));
     params.bypass = bypass ? 1 : 0;
+    params.enabled = (uint8_t) juce::jlimit (0, 1, asInt ("enabled", 1));
     return params;
 }
 
@@ -193,6 +217,7 @@ void DistProcessor::engineToHost (float* left, float* right, int nHost, int nEng
 
 void DistProcessor::processBuffer (juce::AudioBuffer<float>& buffer, bool bypass)
 {
+    runPrintTake();
     juce::ScopedNoDenormals noDenormals;
 
     const int nHost = buffer.getNumSamples();
@@ -244,8 +269,350 @@ juce::String DistProcessor::importRecall (const juce::String& text)
     const auto err = parseRecall (text, parsed);
     if (err.isNotEmpty())
         return err;
+
+    DistPrint printed;
+    parsePrint (text, printed);
+
     applyRecall (apvts, parsed);
+
+    if (printed.events.empty())
+    {
+        clearPrintTake();
+        return {};
+    }
+
+    {
+        const juce::SpinLock::ScopedLockType sl (printLock);
+        printEvents = std::move (printed.events);
+        printLoaded = true;
+    }
+    armPrint();
     return {};
+}
+
+std::vector<DistPrintEvent> DistProcessor::copyPrintEvents() const
+{
+    const juce::SpinLock::ScopedLockType sl (printLock);
+    return printEvents;
+}
+
+juce::RangedAudioParameter* DistProcessor::printParam (int index) const
+{
+    if (index < 0 || index >= kPrintParams)
+        return nullptr;
+    return apvts.getParameter (kPrintIds[index]);
+}
+
+void DistProcessor::endPrintGestures()
+{
+    for (int i = 0; i < kPrintParams; ++i)
+    {
+        if (! printGesturing[(size_t) i])
+            continue;
+        printGesturing[(size_t) i] = false;
+        if (auto* p = printParam (i))
+            p->endChangeGesture();
+    }
+}
+
+bool DistProcessor::printValueAt (const std::vector<DistPrintEvent>& events,
+                                  int index, int tick, int& value)
+{
+    if (index < 0 || index >= kPrintParams)
+        return false;
+    bool found = false;
+    for (const auto& e : events)
+    {
+        if (printIndexForId (e.id) != index || e.tick > tick)
+            continue;
+        found = true;
+        value = e.value;
+    }
+    return found;
+}
+
+void DistProcessor::setPrintParam (int index, int value)
+{
+    auto* p = printParam (index);
+    if (p == nullptr)
+        return;
+    p->setValueNotifyingHost (p->convertTo0to1 ((float) value));
+}
+
+void DistProcessor::writePrintParam (int index, int value)
+{
+    beginPrintGesture (index);
+    setPrintParam (index, value);
+    if (index != kEnabledPrintIndex || ! printGesturing[(size_t) index])
+        return;
+    printGesturing[(size_t) index] = false;
+    if (auto* p = printParam (index))
+        p->endChangeGesture();
+}
+
+void DistProcessor::beginPrintGesture (int index)
+{
+    if (index < 0 || index >= kPrintParams || printGesturing[(size_t) index])
+        return;
+    if (auto* p = printParam (index))
+    {
+        p->beginChangeGesture();
+        printGesturing[(size_t) index] = true;
+    }
+}
+
+void DistProcessor::seedPrintOrigin()
+{
+    std::vector<DistPrintEvent> events;
+    std::array<bool, kPrintParams> moving {};
+    {
+        const juce::SpinLock::ScopedLockType sl (printLock);
+        events = printEvents;
+        moving = printMoving;
+    }
+
+    for (int i = 0; i < kPrintParams; ++i)
+    {
+        if (! moving[(size_t) i])
+            continue;
+        int value = 0;
+        const bool haveOrigin = printValueAt (events, i, 0, value);
+        if (i == kEnabledPrintIndex)
+        {
+            if (haveOrigin)
+                writePrintParam (i, value);
+            continue;
+        }
+        beginPrintGesture (i);
+        if (haveOrigin)
+            setPrintParam (i, value);
+    }
+}
+
+void DistProcessor::armPrint()
+{
+    if (wrapperType == wrapperType_Standalone)
+        return;
+
+    endPrintGestures();
+    {
+        const juce::SpinLock::ScopedLockType sl (printLock);
+        if (printEvents.empty())
+        {
+            printArmed = false;
+            printLoaded = false;
+            return;
+        }
+
+        printMoving.fill (false);
+        bool haveEnabled = false;
+        for (const auto& e : printEvents)
+        {
+            const int i = printIndexForId (e.id);
+            if (i < 0)
+                continue;
+            if (e.tick > 0)
+                printMoving[(size_t) i] = true;
+            if (i == kEnabledPrintIndex)
+                haveEnabled = true;
+        }
+        if (haveEnabled)
+            printMoving[(size_t) kEnabledPrintIndex] = true;
+        printPendingOn.fill (false);
+        printTakeActive = false;
+        printLastTick = 0;
+        havePrintPpq = false;
+        printStopPending = false;
+        printLoaded = true;
+    }
+
+    // Write tick-0 values while stopped so Latch/Write capture bar 1. Async updates
+    // during the take are stamped at the message-thread playhead and can miss the start.
+    seedPrintOrigin();
+
+    {
+        const juce::SpinLock::ScopedLockType sl (printLock);
+        printArmed = true;
+    }
+}
+
+void DistProcessor::disarmPrint()
+{
+    {
+        const juce::SpinLock::ScopedLockType sl (printLock);
+        printArmed = false;
+        printTakeActive = false;
+        printStopPending = false;
+        printPendingOn.fill (false);
+    }
+    endPrintGestures();
+}
+
+void DistProcessor::clearPrintTake()
+{
+    {
+        const juce::SpinLock::ScopedLockType sl (printLock);
+        printArmed = false;
+        printTakeActive = false;
+        printStopPending = false;
+        printEvents.clear();
+        printMoving.fill (false);
+        printPendingOn.fill (false);
+        printLoaded = false;
+        havePrintPpq = false;
+        printLastTick = 0;
+    }
+    endPrintGestures();
+}
+
+bool DistProcessor::setPrintArmed (bool on)
+{
+    if (wrapperType == wrapperType_Standalone)
+        return false;
+    if (on)
+        armPrint();
+    else
+        disarmPrint();
+    return isPrintArmed();
+}
+
+void DistProcessor::queuePrintValue (int index, int value)
+{
+    if (index < 0 || index >= kPrintParams)
+        return;
+    printPending[(size_t) index] = value;
+    printPendingOn[(size_t) index] = true;
+}
+
+void DistProcessor::chasePrintAt (int tick)
+{
+    for (int i = 0; i < kPrintParams; ++i)
+    {
+        if (! printMoving[(size_t) i])
+            continue;
+        int value = 0;
+        if (printValueAt (printEvents, i, tick, value))
+            queuePrintValue (i, value);
+    }
+}
+
+void DistProcessor::emitPrintRange (int fromTick, int toTick)
+{
+    for (const auto& e : printEvents)
+    {
+        if (e.tick <= fromTick || e.tick > toTick)
+            continue;
+        const int index = printIndexForId (e.id);
+        if (index >= 0 && printMoving[(size_t) index])
+            queuePrintValue (index, e.value);
+    }
+}
+
+void DistProcessor::runPrintTake()
+{
+    if (wrapperType == wrapperType_Standalone || ! printArmed.load())
+        return;
+
+    bool hostPlaying = false;
+    bool hasPpq = false;
+    double ppq = 0.0;
+    if (auto* ph = getPlayHead())
+    {
+        if (auto info = ph->getPosition())
+        {
+            hostPlaying = info->getIsPlaying() || info->getIsRecording();
+            if (const auto pos = info->getPpqPosition(); pos.hasValue() && std::isfinite (*pos))
+            {
+                ppq = *pos;
+                hasPpq = true;
+            }
+        }
+    }
+
+    bool notify = false;
+    {
+        const juce::SpinLock::ScopedLockType sl (printLock);
+        if (! printArmed.load())
+            return;
+
+        if (hasPpq && havePrintPpq && std::abs (ppq - printLastPpq) > 1.0e-9)
+            hostPlaying = true;
+        if (hasPpq)
+        {
+            printLastPpq = ppq;
+            havePrintPpq = true;
+        }
+
+        if (! hostPlaying)
+        {
+            if (printTakeActive)
+            {
+                printTakeActive = false;
+                printArmed = false;
+                printStopPending = true;
+                notify = true;
+            }
+        }
+        else if (hasPpq)
+        {
+            const int tick = (int) std::llround (ppq * (double) kPrintPpq);
+            if (! printTakeActive || tick < printLastTick)
+                chasePrintAt (tick);
+            else
+                emitPrintRange (printLastTick, tick);
+            printTakeActive = true;
+            printLastTick = tick;
+            for (bool on : printPendingOn)
+            {
+                if (on)
+                {
+                    notify = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (notify)
+        triggerAsyncUpdate();
+}
+
+void DistProcessor::handleAsyncUpdate()
+{
+    std::array<int, kPrintParams> values {};
+    std::array<bool, kPrintParams> on {};
+    bool stop = false;
+    {
+        const juce::SpinLock::ScopedLockType sl (printLock);
+        values = printPending;
+        on = printPendingOn;
+        printPendingOn.fill (false);
+        stop = printStopPending.exchange (false);
+    }
+
+    for (int i = 0; i < kPrintParams; ++i)
+    {
+        if (! on[(size_t) i])
+            continue;
+        if (i == kEnabledPrintIndex)
+            writePrintParam (i, values[(size_t) i]);
+        else
+        {
+            beginPrintGesture (i);
+            setPrintParam (i, values[(size_t) i]);
+        }
+    }
+
+    if (stop)
+    {
+        {
+            const juce::SpinLock::ScopedLockType sl (printLock);
+            printPendingOn.fill (false);
+            printTakeActive = false;
+            printArmed = false;
+        }
+        endPrintGestures();
+    }
 }
 
 juce::AudioProcessorEditor* DistProcessor::createEditor()

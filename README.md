@@ -54,9 +54,23 @@ one-time `notarytool store-credentials` setup. `--skip-build` packages the curre
 
 ## Controls
 
-| Control | Range  | Notes                                      |
-|---------|--------|--------------------------------------------|
-| Amount  | 0..127 | drive; default 70                          |
-| Shape   | 0..127 | 0 = 1.5 hard clip; 1..127 = waveshaper row |
+| Control | Range  | Notes                                                                 |
+|---------|--------|-----------------------------------------------------------------------|
+| ON      | off/on | internal device on; default on. Off is dry through the engine         |
+| Amount  | 0..127 | drive; default 70                                                     |
+| Shape   | 0..127 | 0 = 1.5 hard clip; 1..127 = waveshaper row                            |
+
+ON is left of Print, Print left of the gear (standalone hides Print, so ON sits left of the gear).
+Host Device On / bypass is separate: it skips DSP and keeps the 64-sample delayed-dry FIFO.
+
+The gear imports a snapshot copied from Modloader (`openrb-distort 1`). Paste applies Amount, Shape,
+and `enabled:` (0 or 1). Missing `enabled:` stays on so older clipboards still load. When the
+clipboard also has `openrb-print 1`, Distort stores those events — including the `enabled` lane —
+and auto-arms Print (the stair-step control left of the gear). Arming writes bar-1 values
+immediately so Latch or Write capture the start. Set the Distort track to Latch or Write (not
+Touch), play from bar 1 once, then stop. Amount / Shape that moved in the song become host
+automation; Enable is always printed and writes stepped On/Off. Static knobs stay at the snapshot.
+Host loop off during the take. Logic’s AU wrapper is the safer Logic path. Ableton Live is the host
+most likely to ignore plugin-originated gestures. Standalone has no Print control.
 
 At 44100 Hz the resamplers are bypassed, so the samples that reach `Distortion` are the host samples.

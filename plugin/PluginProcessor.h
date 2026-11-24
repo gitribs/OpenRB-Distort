@@ -2,12 +2,17 @@
 
 #include <JuceHeader.h>
 #include "orb_dist.h"
+#include "RecallImport.h"
 
+#include <array>
+#include <atomic>
 #include <memory>
+#include <vector>
 
 class DistEditor;
 
-class DistProcessor final : public juce::AudioProcessor
+class DistProcessor final : public juce::AudioProcessor,
+                            private juce::AsyncUpdater
 {
 public:
     DistProcessor();
@@ -38,8 +43,12 @@ public:
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
-    // empty = success; otherwise a short reason for the editor to show
     juce::String importRecall (const juce::String& text);
+
+    bool setPrintArmed (bool on);
+    bool isPrintArmed() const noexcept { return printArmed.load(); }
+    bool hasPrintTake() const noexcept { return printLoaded.load(); }
+    std::vector<DistPrintEvent> copyPrintEvents() const;
 
     juce::AudioProcessorValueTreeState apvts;
 
@@ -49,6 +58,8 @@ private:
         void operator() (OrbDist* p) const noexcept { orb_dist_free (p); }
     };
 
+    static constexpr int kPrintParams = 3;
+
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void processBuffer (juce::AudioBuffer<float>& buffer, bool bypass);
     OrbDistParams readParams (bool bypass) const;
@@ -56,6 +67,23 @@ private:
     int hostToEngine (const float* left, const float* right, int nHost);
     void engineToHost (float* left, float* right, int nHost, int nEngine);
     void shiftFifo (juce::AudioBuffer<float>& fifo, int& fill, int used);
+
+    void handleAsyncUpdate() override;
+    void armPrint();
+    void disarmPrint();
+    void clearPrintTake();
+    void endPrintGestures();
+    void runPrintTake();
+    void queuePrintValue (int index, int value);
+    void chasePrintAt (int tick);
+    void emitPrintRange (int fromTick, int toTick);
+    void setPrintParam (int index, int value);
+    void writePrintParam (int index, int value);
+    void beginPrintGesture (int index);
+    void seedPrintOrigin();
+    juce::RangedAudioParameter* printParam (int index) const;
+    static bool printValueAt (const std::vector<DistPrintEvent>& events,
+                              int index, int tick, int& value);
 
     std::unique_ptr<OrbDist, OrbDistDeleter> dist;
     double hostRate = 44100.0;
@@ -70,6 +98,20 @@ private:
     juce::AudioBuffer<float> monoScratch;
     int hostFifoFill = 0;
     int engineFifoFill = 0;
+
+    mutable juce::SpinLock printLock;
+    std::vector<DistPrintEvent> printEvents;
+    std::array<bool, kPrintParams> printMoving {};
+    std::array<int, kPrintParams> printPending {};
+    std::array<bool, kPrintParams> printPendingOn {};
+    std::array<bool, kPrintParams> printGesturing {};
+    std::atomic<bool> printArmed { false };
+    std::atomic<bool> printStopPending { false };
+    std::atomic<bool> printLoaded { false };
+    bool printTakeActive = false;
+    bool havePrintPpq = false;
+    double printLastPpq = 0.0;
+    int printLastTick = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DistProcessor)
 };

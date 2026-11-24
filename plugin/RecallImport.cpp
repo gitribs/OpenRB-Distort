@@ -1,7 +1,12 @@
 #include "RecallImport.h"
 
+#include <cmath>
+#include <cstring>
+
 namespace
 {
+constexpr int kPrintPpq = 192;
+
 bool parseIntValue (const juce::String& s, int& out)
 {
     const auto t = s.trim();
@@ -31,6 +36,22 @@ void setParam (juce::AudioProcessorValueTreeState& apvts, const juce::String& id
     p->setValueNotifyingHost (p->convertTo0to1 (actual));
     p->endChangeGesture();
 }
+
+const char* internPrintId (const juce::String& s)
+{
+    static constexpr const char* kIds[] = { "amount", "shape", "enabled" };
+    for (auto* id : kIds)
+        if (s == id)
+            return id;
+    return nullptr;
+}
+
+int clampPrintValue (const char* id, int n)
+{
+    if (std::strcmp (id, "enabled") == 0)
+        return juce::jlimit (0, 1, n);
+    return juce::jlimit (0, 127, n);
+}
 } // namespace
 
 juce::String parseRecall (const juce::String& text, DistRecall& out)
@@ -48,7 +69,7 @@ juce::String parseRecall (const juce::String& text, DistRecall& out)
     if (header.size() < 2 || header[1] != "1")
         return "unsupported recall version";
 
-    bool haveAmt = false, haveShape = false;
+    bool haveAmt = false, haveShape = false, haveEnabled = false;
     DistRecall parsed;
 
     for (++line; line < lines.size(); ++line)
@@ -79,10 +100,14 @@ juce::String parseRecall (const juce::String& text, DistRecall& out)
             err = takeInt (0, 127, parsed.amount, haveAmt);
         else if (key == "shape")
             err = takeInt (0, 127, parsed.shape, haveShape);
+        else if (key == "enabled")
+            err = takeInt (0, 1, parsed.enabled, haveEnabled);
 
         if (err.isNotEmpty())
             return err;
     }
+
+    juce::ignoreUnused (haveEnabled);
 
     if (! haveAmt)
         return "missing amount";
@@ -97,4 +122,81 @@ void applyRecall (juce::AudioProcessorValueTreeState& apvts, const DistRecall& v
 {
     setParam (apvts, "amount", (float) values.amount);
     setParam (apvts, "shape", (float) values.shape);
+    setParam (apvts, "enabled", (float) values.enabled);
+}
+
+juce::String parsePrint (const juce::String& text, DistPrint& out)
+{
+    out = {};
+    out.ppq = kPrintPpq;
+
+    const auto lines = juce::StringArray::fromLines (text);
+    int line = 0;
+    bool found = false;
+    for (; line < lines.size(); ++line)
+    {
+        const auto trimmed = lines[line].trim();
+        if (trimmed.isEmpty())
+            continue;
+
+        const auto header = juce::StringArray::fromTokens (trimmed, " \t", {});
+        if (header.isEmpty() || header[0] != "openrb-print")
+            continue;
+        if (header.size() < 2 || header[1] != "1")
+            return {};
+        found = true;
+        ++line;
+        break;
+    }
+
+    if (! found)
+        return {};
+
+    int srcPpq = kPrintPpq;
+    std::vector<DistPrintEvent> events;
+
+    for (; line < lines.size(); ++line)
+    {
+        const auto trimmed = lines[line].trim();
+        if (trimmed.isEmpty())
+            continue;
+
+        const int colon = trimmed.indexOfChar (':');
+        if (colon >= 0)
+        {
+            const auto key = trimmed.substring (0, colon).trim();
+            const auto value = trimmed.substring (colon + 1).trim();
+            if (key == "ppq")
+            {
+                int n = 0;
+                if (parseIntValue (value, n) && n > 0)
+                    srcPpq = n;
+            }
+            continue;
+        }
+
+        const auto tok = juce::StringArray::fromTokens (trimmed, " \t", {});
+        if (tok.size() != 3)
+            continue;
+
+        int tick = 0, value = 0;
+        if (! parseIntValue (tok[0], tick) || ! parseIntValue (tok[2], value))
+            continue;
+
+        const char* id = internPrintId (tok[1]);
+        if (id == nullptr)
+            continue;
+
+        events.push_back ({ tick, id, clampPrintValue (id, value) });
+    }
+
+    if (srcPpq != kPrintPpq)
+    {
+        for (auto& e : events)
+            e.tick = (int) std::llround ((double) e.tick * (double) kPrintPpq / (double) srcPpq);
+    }
+
+    out.ppq = kPrintPpq;
+    out.events = std::move (events);
+    return {};
 }

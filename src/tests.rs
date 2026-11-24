@@ -14,7 +14,7 @@ fn ctx<'a>(tables: &'a Tables) -> BlockContext<'a> {
 fn apply(d: &mut Distortion, params: Params) {
     d.set_param(dist::AMOUNT as u8, params.amount.min(127));
     d.set_param(dist::SHAPE as u8, params.shape.min(127));
-    d.set_param(dist::ENABLED as u8, 1);
+    d.set_param(dist::ENABLED as u8, if params.enabled != 0 { 1 } else { 0 });
 }
 
 /// A few blocks through the wrapper equal `Distortion::process` on each channel, delayed by 64
@@ -81,6 +81,7 @@ fn shape_0_clip_differs_from_the_shaper() {
             amount: 70,
             shape: 0,
             bypass: 0,
+            enabled: 1,
         },
     );
 
@@ -93,6 +94,7 @@ fn shape_0_clip_differs_from_the_shaper() {
             amount: 70,
             shape: 64,
             bypass: 0,
+            enabled: 1,
         },
     );
 
@@ -107,6 +109,7 @@ fn bypass_is_delayed_dry() {
         amount: 70,
         shape: 64,
         bypass: 1,
+        enabled: 0,
     };
     let n = 2 * BLOCK;
     let mut input_l = vec![0.0f32; n];
@@ -127,6 +130,48 @@ fn bypass_is_delayed_dry() {
     assert_eq!(&wrap_r[BLOCK..], &input_r[..BLOCK]);
     assert_eq!(wrap.left().counter, 0);
     assert_eq!(wrap.left().live[dist::AMOUNT], dist::DEFAULTS[dist::AMOUNT]);
+    // Host bypass skips apply_params, so Enable is not written to the engine.
+    assert_eq!(wrap.left().live[dist::ENABLED], dist::DEFAULTS[dist::ENABLED]);
+}
+
+/// Internal Enable off is delayed dry: the engine still runs and returns the bus unchanged.
+#[test]
+fn enabled_off_is_delayed_dry() {
+    let params = Params {
+        amount: 70,
+        shape: 64,
+        bypass: 0,
+        enabled: 0,
+    };
+    let n = 2 * BLOCK;
+    let mut input_l = vec![0.0f32; n];
+    let mut input_r = vec![0.0f32; n];
+    for i in 0..n {
+        input_l[i] = (i as f32) * 0.001;
+        input_r[i] = -(i as f32) * 0.002;
+    }
+
+    let mut wrap_l = input_l.clone();
+    let mut wrap_r = input_r.clone();
+    let mut wrap = DistStereo::new();
+    wrap.process(&mut wrap_l, &mut wrap_r, params);
+
+    assert!(wrap_l[..BLOCK].iter().all(|&x| x == 0.0));
+    assert!(wrap_r[..BLOCK].iter().all(|&x| x == 0.0));
+    assert_eq!(&wrap_l[BLOCK..], &input_l[..BLOCK]);
+    assert_eq!(&wrap_r[BLOCK..], &input_r[..BLOCK]);
+    assert_eq!(wrap.left().live[dist::ENABLED], 0);
+    assert_eq!(wrap.blocks_processed(), 2);
+}
+
+/// amount, shape, bypass, enabled — four bytes, enabled last.
+#[test]
+fn params_abi_enabled_is_last_byte() {
+    assert_eq!(std::mem::size_of::<Params>(), 4);
+    assert_eq!(std::mem::offset_of!(Params, amount), 0);
+    assert_eq!(std::mem::offset_of!(Params, shape), 1);
+    assert_eq!(std::mem::offset_of!(Params, bypass), 2);
+    assert_eq!(std::mem::offset_of!(Params, enabled), 3);
 }
 
 /// A short buffer leaves a remainder; the next call finishes the block.
@@ -161,6 +206,7 @@ fn amount_and_shape_above_127_are_clamped() {
                 amount: v,
                 shape: v,
                 bypass: 0,
+                enabled: 1,
             },
         );
         assert_eq!(p.left().live[dist::AMOUNT], 127);

@@ -25,6 +25,8 @@ pub struct Params {
     pub amount: u8,
     pub shape: u8,
     pub bypass: u8,
+    /// Internal device on (engine `ENABLED`). Independent of host `bypass`.
+    pub enabled: u8,
 }
 
 impl Default for Params {
@@ -34,6 +36,7 @@ impl Default for Params {
             amount: d[dist::AMOUNT],
             shape: d[dist::SHAPE],
             bypass: 0,
+            enabled: d[dist::ENABLED],
         }
     }
 }
@@ -129,10 +132,11 @@ impl DistStereo {
     fn apply_params(&mut self, p: Params) {
         let amount = p.amount.min(127);
         let shape = p.shape.min(127);
+        let enabled = if p.enabled != 0 { 1 } else { 0 };
         for inst in [&mut self.left, &mut self.right] {
             inst.set_param(dist::AMOUNT as u8, amount);
             inst.set_param(dist::SHAPE as u8, shape);
-            inst.set_param(dist::ENABLED as u8, 1);
+            inst.set_param(dist::ENABLED as u8, enabled);
         }
     }
 }
